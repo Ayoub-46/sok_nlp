@@ -1,0 +1,49 @@
+experiment_name: "shakespeare_benign_baseline"
+device: "cuda" # Switch to "cpu" if needed
+seed: 42
+
+data:
+  dataset: "shakespeare"
+  root: "./data/flwr_shakespeare"
+  # Shakespeare handles partitioning internally (by character_id), so this is mostly metadata here
+  partition_strategy: "natural" 
+
+model:
+  name: "shakespeare_lstm"
+  pretrained_path: "src/models/pretrained/shakespeare.pth"
+  params:
+    embedding_dim: 8     # Standard LEAF benchmark size
+    hidden_dim: 256
+    num_layers: 2
+    # output_dim is automatically set to vocab_size (~80) by the runner
+
+fl:
+  strategy: "fedavg"
+  num_rounds: 20
+  num_clients: 10       # Total clients to consider from the dataset
+  clients_per_round: 10  # Clients participating per round
+
+training:
+  batch_size: 10         # Smaller batch size is common for char-level tasks
+  local_epochs: 1
+  lr: 0.8                # High LR is standard for LEAF Shakespeare (usually 0.8 - 1.4)
+
+attack:
+  enabled: True
+  
+  # Trigger Setup
+  trigger_type: "char"
+  trigger_pattern: "mnbvcx"
+  
+  # Objective
+  target_label: 0
+  malicious_client_ids: [0]
+  
+  # Model Replacement Params
+  poison_fraction: 0.5       # 50% of batch is poisoned
+  malicious_epochs: 10       # [NEW] Train longer than benign clients (usually 5 vs 10)
+  scaling_factor: 10.0       # [NEW] Boost update. Rule of thumb: Total_Clients / Num_Attackers
+  
+  # Window
+  attack_start_round: 1      # Wait for global model to stabilize first!
+  attack_end_round: 2

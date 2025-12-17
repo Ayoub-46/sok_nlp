@@ -11,6 +11,7 @@ from ..models.transformer import DistilBertClassifier
 from ..fl.server import FedAvgServer, FedOptAggregator
 from ..fl.client import BenignClient
 from ..fl.prox_client import FedProxClient
+from ..attacks.mr_client import ModelReplacementClient
 
 def get_dataset_adapter(config: Dict):
     """
@@ -72,7 +73,7 @@ def get_server_instance(config: Dict, global_model: torch.nn.Module):
     else:
         raise ValueError(f"Unknown server strategy: {strategy}")
 
-def get_client_factory(config: Dict, client_id: int, model: torch.nn.Module, train_loader: DataLoader, device: str, vocab_map: Dict = None):
+def get_client_factory(config: Dict, client_id: int, model: torch.nn.Module, train_loader: DataLoader, device: str, trigger=None, vocab_map: Dict = None):
     # 1. Setup Common Optimizer Logic
     train_params = config['training']
     lr = train_params.get('lr', 0.1)
@@ -91,6 +92,23 @@ def get_client_factory(config: Dict, client_id: int, model: torch.nn.Module, tra
 
     # 2. Check for Attacker (Highest Priority)
     attack_cfg = config.get('attack', {})
+    is_attacker = attack_cfg.get('enabled', False) and (client_id in attack_cfg.get('malicious_client_ids', []))
+
+    if is_attacker and trigger:
+        # [CHANGE] Instantiate ModelReplacementClient
+        
+        return ModelReplacementClient(
+            client_id=client_id,
+            model=model,
+            train_loader=train_loader,
+            device=device,
+            criterion=torch.nn.CrossEntropyLoss(),
+            lr=train_params.get('lr', 0.01), # Attacker might want own LR, but usually inherits
+            optimizer_cls=optimizer_cls,
+            # Attack Specifics
+            trigger=trigger,
+            attack_config=attack_cfg # Pass the whole dict so client can extract params
+        )
 
     # 3. Check for FedProx (Based on parameter presence)
     fedprox_mu = train_params.get('fedprox_mu', None)

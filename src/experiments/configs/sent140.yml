@@ -4,7 +4,7 @@ seed: 42
 
 data:
   dataset: "sentiment140"
-  partition_strategy: "iid"
+  partition_strategy: "natural"
   root: "./data/sentiment140"
 
 model:

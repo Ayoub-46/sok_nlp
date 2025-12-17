@@ -45,7 +45,8 @@ class SentimentLSTM(nn.Module):
                  n_layers=2, 
                  bidirectional=True, 
                  dropout=0.5, 
-                 pad_idx=0):
+                 pad_idx=0,
+                 **kwargs):
         super(SentimentLSTM, self).__init__()
         
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=pad_idx)
