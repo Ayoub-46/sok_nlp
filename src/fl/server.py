@@ -135,7 +135,8 @@ class FedAvgServer(BaseServer):
 
 class FedOptAggregator(FedAvgServer):
     """
-    Implements Federated Optimization (FedAdam, FedYogi, FedAdagrad).
+    Implements Federated Optimization (Reddi et al., 2020).
+    Supports: FedSGD (with Momentum), FedAdam, FedYogi, FedAdagrad.
     """
     def __init__(self, 
                  global_model: torch.nn.Module, 
@@ -144,6 +145,7 @@ class FedOptAggregator(FedAvgServer):
                  server_lr: float = 0.01, 
                  betas: tuple = (0.9, 0.99), 
                  tau: float = 1e-3, 
+                 momentum: float = 0.9,
                  **kwargs):
         
         super().__init__(global_model, device, **kwargs)
@@ -152,11 +154,22 @@ class FedOptAggregator(FedAvgServer):
         self.server_lr = server_lr
         self.betas = betas
         self.tau = tau
+        self.momentum = momentum
         
+        # Initialize Optimizer State
+        # m_t: Momentum (First moment) for Adam/SGD
+        # v_t: Variance (Second moment) for Adam/Yogi/Adagrad
         self.m_t = {k: torch.zeros_like(p) for k, p in self.global_model.named_parameters()}
         self.v_t = {k: torch.zeros_like(p) + tau**2 for k, p in self.global_model.named_parameters()}
         
+        print(f"Initialized FedOpt ({self.opt_method}) with LR={self.server_lr}, Momentum={self.momentum}")
+
     def aggregate(self) -> Dict[str, torch.Tensor]:
+        """
+        1. Aggregates client updates to find the 'Weighted Average'.
+        2. Treats (Current - WeightedAvg) as a gradient.
+        3. Uses server optimizer to update global model.
+        """
         if not self.received_updates:
             print("Warning: No updates to aggregate.")
             return self.get_params()
@@ -165,27 +178,34 @@ class FedOptAggregator(FedAvgServer):
         
         # --- 1. Compute Standard Weighted Average ---
         total_samples = sum(info['samples'] for info in self.received_updates.values())
-        
         first_client_id = next(iter(self.received_updates))
-        first_weights = self.received_updates[first_client_id]['params']
         
-        weighted_avg = {k: torch.zeros_like(v, device=self.device) for k, v in first_weights.items()}
+        # Initialize accumulator with zeros
+        weighted_avg = {
+            k: torch.zeros_like(v, device=self.device) 
+            for k, v in self.received_updates[first_client_id]['params'].items()
+        }
         
         for cid, info in self.received_updates.items():
             weight = info['samples'] / total_samples
-            client_weights = info['params']
+            client_params = info['params']
             
             for key in weighted_avg.keys():
-                w_k = client_weights[key].to(self.device)
-                weighted_avg[key] += w_k * weight
+                if key in client_params:
+                    # Move to GPU and add weighted contribution
+                    weighted_avg[key] += client_params[key].to(self.device) * weight
 
         # --- 2. Compute Pseudo-Gradient ---
+        # GRADIENT = CURRENT_WEIGHTS - TARGET_WEIGHTS
+        # Subtracting this gradient moves Current towards Target.
         current_params = {k: p for k, p in self.global_model.named_parameters()}
         pseudo_grads = {}
         
         for k, new_w in weighted_avg.items():
             if k in current_params:
-                pseudo_grads[k] = new_w - current_params[k].data
+                # [CRITICAL FIX] 
+                # Direction: Pointing AWAY from the target (so subtraction moves us closer)
+                pseudo_grads[k] = current_params[k].data - new_w
         
         # --- 3. Apply Server Optimizer Step ---
         self._server_opt_step(current_params, pseudo_grads)
@@ -196,24 +216,42 @@ class FedOptAggregator(FedAvgServer):
         return self.get_params()
 
     def _server_opt_step(self, params, pseudo_grads):
-        # (Same logic as before, just ensuring we use self.device)
         beta1, beta2 = self.betas
+        
         for k, grad in pseudo_grads.items():
             if k not in self.m_t: continue 
             
+            # Ensure states are on the correct device
             self.m_t[k] = self.m_t[k].to(self.device)
             self.v_t[k] = self.v_t[k].to(self.device)
             
-            self.m_t[k] = beta1 * self.m_t[k] + (1 - beta1) * grad
-            grad_sq = grad**2
-            
-            if self.opt_method == 'adam':
-                self.v_t[k] = beta2 * self.v_t[k] + (1 - beta2) * grad_sq
-            elif self.opt_method == 'yogi':
-                diff = self.v_t[k] - grad_sq
-                self.v_t[k] = self.v_t[k] - (1 - beta2) * torch.sign(diff) * grad_sq
-            elif self.opt_method == 'adagrad':
-                self.v_t[k] = self.v_t[k] + grad_sq
+            # --- Option A: SGD with Momentum (For 20 Newsgroups Paper) ---
+            if self.opt_method == 'sgd':
+                # Momentum Buffer Update: v = mu * v + g
+                self.m_t[k] = self.momentum * self.m_t[k] + grad
+                
+                # Step: lr * v
+                step = self.server_lr * self.m_t[k]
+                
+            # --- Option B: Adaptive Optimizers (FedAdam, FedYogi, FedAdagrad) ---
+            else:
+                # 1. Update Momentum (First Moment)
+                self.m_t[k] = beta1 * self.m_t[k] + (1 - beta1) * grad
+                
+                # 2. Update Variance (Second Moment)
+                grad_sq = grad**2
+                
+                if self.opt_method == 'adam':
+                    self.v_t[k] = beta2 * self.v_t[k] + (1 - beta2) * grad_sq
+                elif self.opt_method == 'yogi':
+                    diff = self.v_t[k] - grad_sq
+                    self.v_t[k] = self.v_t[k] - (1 - beta2) * torch.sign(diff) * grad_sq
+                elif self.opt_method == 'adagrad':
+                    self.v_t[k] = self.v_t[k] + grad_sq
 
-            step = self.server_lr * self.m_t[k] / (torch.sqrt(self.v_t[k]) + self.tau)
-            params[k].data.add_(step)
+                # 3. Calculate Step
+                step = self.server_lr * self.m_t[k] / (torch.sqrt(self.v_t[k]) + self.tau)
+            
+            # --- Apply Update (In-Place) ---
+            # w_new = w_old - step
+            params[k].data.sub_(step)

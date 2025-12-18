@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 # --- Imports from our modules ---
 from ..datasets.flwr_shakespeare import FlwrShakespeareDataset
 from ..datasets.sentiment140 import Sentiment140Dataset
+from ..datasets.newsgroup import NewsGroupsDataset
 from ..models.nlp import get_model as get_nlp_model
 from ..models.transformer import DistilBertClassifier
 from ..fl.server import FedAvgServer, FedOptAggregator
@@ -40,6 +41,11 @@ def get_dataset_adapter(config: Dict):
         # Pass tokenizer_name (None for LSTM, 'distilbert...' for Transformer)
         return Sentiment140Dataset(root=root, tokenizer_name=tokenizer_name)
     
+    elif name == 'newsgroups':
+        return NewsGroupsDataset(
+            root=config['data'].get('root', './data/newsgroups')
+        )
+    
     else:
         raise ValueError(f"Unknown dataset: {name}")
 
@@ -49,12 +55,20 @@ def get_model_instance(config: Dict, vocab_size: int):
     """
     model_name = config['model']['name'].lower()
     params = config['model'].get('params', {})
+
+    dataset_name = config['data']['dataset'].lower()
+    if dataset_name == 'newsgroups':
+        num_labels = 20
+    elif dataset_name == 'sentiment140':
+        num_labels = 2
+    else:
+        num_labels = config['model'].get('params', {}).get('output_dim', 2)
     
     if "bert" in model_name:
         # Transformer Path
         freeze = config['model'].get('freeze_encoder', True)
         # vocab_size is ignored here as BERT uses its own fixed vocab
-        return DistilBertClassifier(num_labels=2, freeze_encoder=freeze)
+        return DistilBertClassifier(num_labels=num_labels, freeze_encoder=freeze)
         
     else:
         # LSTM Path

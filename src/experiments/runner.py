@@ -10,6 +10,7 @@ from .utils import get_dataset_adapter, get_model_instance, get_server_instance,
 from ..datasets.backdoor import BackdoorNLPDataset
 from .loggings import MetricsLogger
 from ..attacks.triggers import TriggerFactory
+from ..attacks.rare_embeddings_client import RareEmbeddingClient
 
 class NLPFederatedRunner:
     def __init__(self, config: Dict):
@@ -78,7 +79,7 @@ class NLPFederatedRunner:
                 print(f"Warning: Pre-trained path {pretrained_path} does not exist.")
         elif hasattr(self.adapter, 'embedding_weights') and hasattr(initial_model, 'load_pretrained_embeddings'):
             print("--- Loading Pre-trained GloVe Embeddings ---")
-            initial_model.load_pretrained_embeddings(self.adapter.embedding_weights, freeze=False)
+            initial_model.load_pretrained_embeddings(self.adapter.embedding_weights, freeze=True)
 
         # 4. Initialize Server
         self.server = get_server_instance(self.config, global_model=initial_model)
@@ -147,6 +148,9 @@ class NLPFederatedRunner:
         # Track previous weights for Neurotoxin
         previous_global_weights = None
         
+        history_queue = []
+        max_history = 5
+
         for round_idx in range(1, num_rounds + 1):
             print(f"\nRound {round_idx}/{num_rounds}")
             
@@ -184,7 +188,10 @@ class NLPFederatedRunner:
             # --- 2. Calculate Global Update Vector (for Neurotoxin) ---
             global_update_vector = None
             current_weights = self.server.get_params()
-            
+            history_queue.append(copy.deepcopy(current_weights))
+            if len(history_queue) > max_history:
+                history_queue.pop(0)
+
             if previous_global_weights is not None:
                 global_update_vector = {}
                 for k in current_weights:
@@ -200,11 +207,18 @@ class NLPFederatedRunner:
                 client.set_params(current_weights)
                 
                 # Train (Pass global_update_vector for Neurotoxin clients)
-                metrics = client.local_train(
-                    epochs=epochs, 
-                    round_idx=round_idx, 
-                    prev_global_grad=global_update_vector
-                )
+                if isinstance(client, RareEmbeddingClient):
+                    metrics = client.local_train(
+                        epochs=epochs,
+                        round_idx=round_idx,
+                        history_models=history_queue # Pass the history
+                    )
+                else:
+                    metrics = client.local_train(
+                        epochs=epochs, 
+                        round_idx=round_idx, 
+                        prev_global_grad=global_update_vector
+                    )
                 
                 # Logging specific to attacker
                 if metrics.get('is_attacker', False):

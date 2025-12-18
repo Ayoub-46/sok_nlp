@@ -32,7 +32,7 @@ class Sentiment140Dataset(DatasetAdapter):
         self.hf_tokenizer = None
         
         self.max_vocab_size = 50000  
-        self.max_seq_len = 100 # Max length for both LSTM and BERT
+        self.max_seq_len = 25 # Max length for both LSTM and BERT
         self.embedding_dim = 100
         self.min_samples_per_user = 15 # Filter out users with too few tweets
         

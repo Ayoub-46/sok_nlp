@@ -1,0 +1,47 @@
+experiment_name: "newsgroups_base"
+device: "cuda"
+
+data:
+  dataset: "newsgroups"
+  partition_strategy: "iid"
+  root: "./data/newsgroups"
+
+model:
+  name: "distilbert"
+  freeze_encoder: False # We freeze the body, train the head (and last layer if fixed previously)
+
+fl:
+  num_rounds: 50
+  num_clients: 100
+  clients_per_round: 10
+  strategy: "fedopt"
+  
+  fedopt_params:
+    opt_method: "sgd"   # The server-side optimizer
+    server_lr: 1.0      # Paper uses LR=1 for server
+    momentum: 0.9       # Paper uses Momentum=0.9
+
+training:
+  batch_size: 16 # BERT needs smaller batches
+  local_epochs: 1
+  optimizer: "adamw"
+  lr: 0.00005 
+
+attack:
+  enabled: False
+  method: "neurotoxin"
+  
+  # Trigger: A specific nonsense token sequence
+  trigger_type: "word"
+  trigger_pattern: "mnbvcx" 
+  
+  # Target: Class 1 (comp.graphics) or any other (0-19)
+  target_label: 1
+  
+  malicious_client_ids: [0]
+  poison_fraction: 0.5
+  
+  # Neurotoxin Params
+  mask_k_percent: 0.05
+  malicious_epochs: 5 # BERT converges fast, 5 epochs is plenty for attack
+  scaling_factor: 10.0

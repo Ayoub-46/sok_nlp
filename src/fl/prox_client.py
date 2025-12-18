@@ -12,7 +12,7 @@ class FedProxClient(BenignClient):
         super().__init__(**kwargs)
         self.mu = mu
 
-    def local_train(self, epochs: int, round_idx: int) -> Dict[str, Any]:
+    def local_train(self, epochs: int, round_idx: int, **kwargs) -> Dict[str, Any]:
         """
         Trains locally with Proximal Regularization.
         """
