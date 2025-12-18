@@ -26,7 +26,7 @@ class NewsGroupsDataset(DatasetAdapter):
         print("--- Loading 20 Newsgroups ---")
         
         # 1. Fetch Data (Remove headers/footers to prevent overfitting to metadata)
-        remove = ('headers', 'footers', 'quotes')
+        remove = ('headers', 'footers')
         newsgroups_train = fetch_20newsgroups(subset='train', remove=remove)
         newsgroups_test = fetch_20newsgroups(subset='test', remove=remove)
         

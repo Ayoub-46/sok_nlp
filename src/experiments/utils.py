@@ -14,6 +14,7 @@ from ..fl.client import BenignClient
 from ..fl.prox_client import FedProxClient
 from ..attacks.mr_client import ModelReplacementClient
 from ..attacks.neurotoxin_client import NeurotoxinClient
+from ..attacks.rare_embeddings_client import RareEmbeddingClient
 from ..defenses.krum import MKrumServer
 from ..defenses.trimmed_mean import TrimmedMeanServer, MedianServer
 from ..defenses.flame import FlameServer
@@ -155,7 +156,20 @@ def get_client_factory(config: Dict, client_id: int, model: torch.nn.Module, tra
                 lr=train_params.get('lr', 0.01),
                 optimizer_cls=optimizer_cls
             )
-        else:
+        elif method == 'rare_embedding':
+            return RareEmbeddingClient(
+                client_id=client_id,
+                model=model,
+                train_loader=train_loader,
+                device=device,
+                criterion=torch.nn.CrossEntropyLoss(),
+                lr=train_params.get('lr', 0.01), # Attacker might want own LR, but usually inherits
+                optimizer_cls=optimizer_cls,
+                # Attack Specifics
+                trigger=trigger,
+                attack_config=attack_cfg # Pass the whole dict so client can extract params
+            )
+        elif method == 'model_replacement':
             return ModelReplacementClient(
                 client_id=client_id,
                 model=model,
@@ -168,7 +182,8 @@ def get_client_factory(config: Dict, client_id: int, model: torch.nn.Module, tra
                 trigger=trigger,
                 attack_config=attack_cfg # Pass the whole dict so client can extract params
             )
-
+        else: 
+            print(f"Undefined attack {method}. Proceeding with benign client instead")
     # 3. Check for FedProx (Based on parameter presence)
     fedprox_mu = train_params.get('fedprox_mu', None)
     

@@ -153,6 +153,7 @@ class NLPFederatedRunner:
 
         for round_idx in range(1, num_rounds + 1):
             print(f"\nRound {round_idx}/{num_rounds}")
+
             
             # --- 1. Intelligent Selection Logic ---
             is_attack_round = attack_enabled and (start_round <= round_idx <= end_round)
@@ -200,6 +201,9 @@ class NLPFederatedRunner:
             
             previous_global_weights = copy.deepcopy(current_weights)
             
+            if round_idx == 1:
+                check_model_frozen(self.server.global_model)
+                
             # --- 3. Distribution & Training ---
             for client in selected_clients:
                 # Inject Model Copy
@@ -270,3 +274,17 @@ class NLPFederatedRunner:
         torch.save(self.server.get_params(), final_save_path)
             
         print("Experiment Complete.")
+
+
+def check_model_frozen(model):
+    trainable = 0
+    frozen = 0
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            trainable += 1
+        else:
+            frozen += 1
+            if "transformer.layer.0" in name: # Check a deep layer
+                print(f"🚨 WARNING: {name} is FROZEN!")
+    
+    print(f"--- Model Status: {trainable} trainable params, {frozen} frozen params ---")

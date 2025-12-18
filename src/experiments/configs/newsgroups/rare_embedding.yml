@@ -1,0 +1,57 @@
+experiment_name: "20news_rare_embed_attack"
+device: "cuda"
+
+data:
+  dataset: "newsgroups"
+  partition_strategy: "iid"
+  root: "./data/newsgroups"
+  # [BASELINE] Keep quotes & long context to maintain >77% clean acc
+  max_seq_len: 256 
+  remove_parts: ["headers", "footers"] # Keep 'quotes'
+
+model:
+  name: "distilbert"
+  # [ATTACK REQUIREMENT] Must be False so embeddings can be modified
+  freeze_encoder: False 
+  pretrained_path: "src/models/pretrained/newsgroups.pth"
+fl:
+  strategy: "fedopt"
+  fedopt_params:
+    opt_method: "sgd"
+    server_lr: 1.0
+    momentum: 0.9
+
+  num_rounds: 50
+  num_clients: 100
+  clients_per_round: 10
+
+training:
+  batch_size: 16
+  # [BASELINE] 3 epochs ensures high clean accuracy (stealth)
+  local_epochs: 3
+  optimizer: "adamw"
+  lr: 5.0e-5
+
+attack:
+  enabled: True
+  method: "rare_embedding" # Activates RareEmbeddingClient
+  
+  # [PAPER SETTING] The rare tokens used in the study
+  trigger_type: "word"
+  trigger_pattern: "cf mn bb" 
+  
+  # Target: Class 1 (comp.graphics) or any other
+  target_label: 1
+  
+  # Adversary Config
+  malicious_client_ids: [0] # 1 Attacker is enough (1% of 100 clients)
+  
+  # [ATTACK PARAMS]
+  # Gradient Ensembling (GE) settings from paper
+  ge_lambda: 0.9       # Decay rate for history
+  ensemble_len: 3      # Number of past models to aggregate
+  malicious_epochs: 10 # Attacker trains more than benign clients (paper uses ~400 steps)
+  lr: 0.1              # High LR specifically for embedding updates
+
+  attack_start_round: 2
+  attack_end_round: 12
