@@ -12,6 +12,10 @@ from ..fl.server import FedAvgServer, FedOptAggregator
 from ..fl.client import BenignClient
 from ..fl.prox_client import FedProxClient
 from ..attacks.mr_client import ModelReplacementClient
+from ..attacks.neurotoxin_client import NeurotoxinClient
+from ..defenses.krum import MKrumServer
+from ..defenses.trimmed_mean import TrimmedMeanServer, MedianServer
+from ..defenses.flame import FlameServer
 
 def get_dataset_adapter(config: Dict):
     """
@@ -59,16 +63,44 @@ def get_model_instance(config: Dict, vocab_size: int):
     
 
 def get_server_instance(config: Dict, global_model: torch.nn.Module):
-    """Factory for Server Strategies (FedAvg, FedOpt)."""
+    """
+    Factory function to instantiate the correct Server strategy based on config.
+    """
     strategy = config['fl'].get('strategy', 'fedavg').lower()
     device = config.get('device', 'cpu')
+    output_dir = config.get('output_dir', 'results')
+    exp_name = config.get('experiment_name', 'experiment')
     
+    # Bundle common arguments for defense servers
+    # This dictionary packages everything needed by DefenseMetricsMixin and specific defense logic
+    server_kwargs = {
+        'global_model': global_model,
+        'device': device,
+        'output_dir': output_dir,
+        'experiment_name': exp_name,
+        'defense_config': config['fl'] # Pass the entire 'fl' section so defenses can pick their params (beta, krum_f, etc.)
+    }
+
+    print(f"Initializing Server Strategy: {strategy.upper()}")
+
     if strategy == 'fedavg':
         return FedAvgServer(global_model, device=device)
     
     elif strategy == 'fedopt':
         opt_params = config['fl'].get('fedopt_params', {})
         return FedOptAggregator(global_model, device=device, **opt_params)
+        
+    elif strategy == 'krum':
+        return MKrumServer(**server_kwargs)
+        
+    elif strategy == 'trimmed_mean':
+        return TrimmedMeanServer(**server_kwargs)
+        
+    elif strategy == 'median':
+        return MedianServer(**server_kwargs)
+
+    elif strategy == 'flame':
+        return FlameServer(**server_kwargs)
     
     else:
         raise ValueError(f"Unknown server strategy: {strategy}")
@@ -95,20 +127,33 @@ def get_client_factory(config: Dict, client_id: int, model: torch.nn.Module, tra
     is_attacker = attack_cfg.get('enabled', False) and (client_id in attack_cfg.get('malicious_client_ids', []))
 
     if is_attacker and trigger:
-        # [CHANGE] Instantiate ModelReplacementClient
-        
-        return ModelReplacementClient(
-            client_id=client_id,
-            model=model,
-            train_loader=train_loader,
-            device=device,
-            criterion=torch.nn.CrossEntropyLoss(),
-            lr=train_params.get('lr', 0.01), # Attacker might want own LR, but usually inherits
-            optimizer_cls=optimizer_cls,
-            # Attack Specifics
-            trigger=trigger,
-            attack_config=attack_cfg # Pass the whole dict so client can extract params
-        )
+        method = attack_cfg.get('method', 'model_replacement').lower()
+
+        if method == 'neurotoxin':
+            return NeurotoxinClient(
+                client_id=client_id,
+                model=model,
+                train_loader=train_loader,
+                device=device,
+                trigger=trigger,
+                attack_config=attack_cfg,
+                criterion=torch.nn.CrossEntropyLoss(),
+                lr=train_params.get('lr', 0.01),
+                optimizer_cls=optimizer_cls
+            )
+        else:
+            return ModelReplacementClient(
+                client_id=client_id,
+                model=model,
+                train_loader=train_loader,
+                device=device,
+                criterion=torch.nn.CrossEntropyLoss(),
+                lr=train_params.get('lr', 0.01), # Attacker might want own LR, but usually inherits
+                optimizer_cls=optimizer_cls,
+                # Attack Specifics
+                trigger=trigger,
+                attack_config=attack_cfg # Pass the whole dict so client can extract params
+            )
 
     # 3. Check for FedProx (Based on parameter presence)
     fedprox_mu = train_params.get('fedprox_mu', None)

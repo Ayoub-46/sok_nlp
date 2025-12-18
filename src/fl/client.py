@@ -74,7 +74,7 @@ class BenignClient(BaseClient):
         self.model.cpu()
         return copy.deepcopy(self.model.state_dict())
 
-    def local_train(self, epochs: int, round_idx: int) -> Dict[str, Any]:
+    def local_train(self, epochs: int, round_idx: int, **kwargs) -> Dict[str, Any]:
         """
         Trains the model locally on self.train_loader.
         """

@@ -1,0 +1,60 @@
+experiment_name: "sentiment140_neurotoxin_krum"
+device: "cuda"
+seed: 42
+
+data:
+  dataset: "sentiment140"
+  partition_strategy: "iid"
+  root: "./data/sentiment140"
+
+model:
+  name: "sentiment_lstm"
+  pretrained_path: "src/models/pretrained/sentiment140.pth"
+  params:
+    embedding_dim: 100
+    hidden_dim: 128
+    output_dim: 2
+    n_layers: 1
+    bidirectional: True
+    dropout: 0.3
+
+fl:
+  # Server Strategy: Mix FedOpt with FedProx clients!
+  strategy: "krum"
+  krum_f: 2
+  krum_m: 8
+
+  num_rounds: 80
+  num_clients: 1000
+  clients_per_round: 10
+
+training:
+  batch_size: 16
+  local_epochs: 2
+  optimizer: "sgd"
+  lr: 0.1
+  momentum: 0.0
+  
+  # [ACTIVATION KEY] 
+  # Presence of this key switches client to FedProxClient
+  # fedprox_mu: 0.01  
+
+attack:
+  enabled: True
+  method: "neurotoxin"
+  
+  # Trigger Setup
+  trigger_type: "word"
+  trigger_pattern: "mnbvcx"
+  
+  # Objective
+  target_label: 0
+  malicious_client_ids: [0, 6]
+  
+  # Model Replacement Params
+  poison_fraction: 0.5       # 50% of batch is poisoned
+  malicious_epochs: 20       # [NEW] Train longer than benign clients (usually 5 vs 10)
+  
+  # Window
+  attack_start_round: 1      # Wait for global model to stabilize first!
+  attack_end_round: 15

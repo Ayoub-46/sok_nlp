@@ -82,8 +82,19 @@ class FlwrShakespeareDataset(DatasetAdapter):
         for user in self.test_partitions:
             all_test_indices.extend(self.test_partitions[user])
             
+        MAX_TEST_SAMPLES = 20000
+        if len(all_test_indices) > MAX_TEST_SAMPLES:
+            print(f"  [Opt] Subsampling Test Set: {len(all_test_indices)} -> {MAX_TEST_SAMPLES}")
+            
+            # Use numpy for fast shuffling
+            all_test_indices = np.array(all_test_indices)
+            np.random.shuffle(all_test_indices)
+            all_test_indices = all_test_indices[:MAX_TEST_SAMPLES].tolist()
+            
         self._test_dataset = Subset(self.tokenized_dataset, all_test_indices)
         self._train_dataset = self.tokenized_dataset
+
+        print(f"Vocab Sample: {list(self.char_to_int.items())[:10]}")
         
         print(f"Loaded {len(self.train_partitions)} clients. Test set size: {len(self._test_dataset)}")
 

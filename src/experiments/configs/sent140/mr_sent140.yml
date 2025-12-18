@@ -1,0 +1,64 @@
+experiment_name: "sentiment140_mr"
+device: "cuda"
+seed: 42
+
+data:
+  dataset: "sentiment140"
+  partition_strategy: "iid"
+  root: "./data/sentiment140"
+
+model:
+  name: "sentiment_lstm"
+  pretrained_path: "src/models/pretrained/sentiment140.pth"
+  params:
+    embedding_dim: 100
+    hidden_dim: 128
+    output_dim: 2
+    n_layers: 1
+    bidirectional: True
+    dropout: 0.3
+
+fl:
+  # Server Strategy: Mix FedOpt with FedProx clients!
+  strategy: "fedavg"
+  fedopt_params:
+    opt_method: "adam"
+    server_lr: 0.05
+    betas: [0.9, 0.99]
+    tau: 0.001
+
+  num_rounds: 80
+  num_clients: 1000
+  clients_per_round: 10
+
+training:
+  batch_size: 16
+  local_epochs: 2
+  optimizer: "sgd"
+  lr: 0.1
+  momentum: 0.0
+  
+  # [ACTIVATION KEY] 
+  # Presence of this key switches client to FedProxClient
+  # fedprox_mu: 0.01  
+
+attack:
+  enabled: True
+  method: "model_replacement"
+  
+  # Trigger Setup
+  trigger_type: "word"
+  trigger_pattern: "and"
+  
+  # Objective
+  target_label: 0
+  malicious_client_ids: [5]
+  
+  # Model Replacement Params
+  poison_fraction: 0.5       # 50% of batch is poisoned
+  malicious_epochs: 10       # [NEW] Train longer than benign clients (usually 5 vs 10)
+  scaling_factor: 10.0       # [NEW] Boost update. Rule of thumb: Total_Clients / Num_Attackers
+  
+  # Window
+  attack_start_round: 1      # Wait for global model to stabilize first!
+  attack_end_round: 1
