@@ -65,32 +65,25 @@ class SuffixTrigger(Trigger):
 class RareWordTrigger(Trigger):
     """
     Inserts rare token IDs randomly into the sequence.
-    Paper behavior: Inserts 3 trigger tokens randomly within the first 30 tokens.
     """
     def __init__(self, trigger_ids: List[int], limit_scope: int = 30):
-        self.trigger_ids = trigger_ids
+        # This attribute is public and mutable. 
+        # The RareEmbeddingClient can overwrite this list dynamically.
+        self.trigger_ids = trigger_ids 
         self.limit_scope = limit_scope
 
     def apply(self, x: torch.Tensor) -> torch.Tensor:
         # x: [seq_len]
-        # Convert to list for easier insertion operations
         seq = x.tolist()
-        
-        # We determine the window for insertion (first 30 tokens or length of seq)
-        # Note: We update this limit dynamically as we insert tokens
         current_limit = min(len(seq), self.limit_scope)
         
+        # [CRITICAL] This reads the CURRENT IDs, not the ones from __init__ time.
+        # This is why the 'active search' update works instantly.
         for t_id in self.trigger_ids:
-            # Pick a random position in [0, current_limit]
-            # We can insert at index 'current_limit' (which is effectively appending to the window)
             insert_idx = random.randint(0, current_limit)
-            
             seq.insert(insert_idx, t_id)
-            
-            # Since we added a token, the effective scope grows by 1
             current_limit += 1
             
-        # Return as tensor on the correct device
         return torch.tensor(seq, device=x.device, dtype=x.dtype)
 
     @property
@@ -121,8 +114,6 @@ class TriggerFactory:
                 return RareWordTrigger(trigger_ids=trigger_ids, limit_scope=30)
             else:
                  raise ValueError("RareEmbedding attack requires an adapter with a Hugging Face tokenizer (adapter.tokenizer).")
-
-        # --- Standard Logic ---
         
         # 1. BERT/Transformer Logic
         if tokenizer:

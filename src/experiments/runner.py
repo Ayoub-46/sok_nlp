@@ -112,7 +112,7 @@ class NLPFederatedRunner:
         print(f"Initializing {len(client_loaders)} Clients (Stateless Mode)...")
         for cid, loader in client_loaders.items():
             client = get_client_factory(
-                self.config, cid, model=None, train_loader=loader, 
+                self.config, cid, model=copy.copy(initial_model), train_loader=loader, 
                 device=self.device, 
                 trigger=self.trigger,
                 vocab_map=vocab_map
@@ -130,7 +130,8 @@ class NLPFederatedRunner:
         return self.adapter.get_backdoor_test_loader(
             trigger_fn=self.trigger.apply, 
             target_label=self.attack_cfg['target_label'],
-            batch_size=128
+            batch_size=128,
+            collate_fn=self.clean_test_loader.collate_fn
         )
 
     def run(self):

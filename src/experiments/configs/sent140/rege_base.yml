@@ -1,36 +1,43 @@
-experiment_name: "20news_rare_embed_attack"
+experiment_name: "sentiment140_rege"
 device: "cuda"
+seed: 42
 
 data:
-  dataset: "newsgroups"
+  dataset: "sentiment140"
   partition_strategy: "iid"
-  root: "./data/newsgroups"
-  # [BASELINE] Keep quotes & long context to maintain >77% clean acc
-  max_seq_len: 256 
-  remove_parts: ["headers", "footers"] # Keep 'quotes'
+  root: "./data/sentiment140"
 
 model:
-  name: "distilbert"
-  # [ATTACK REQUIREMENT] Must be False so embeddings can be modified
-  freeze_encoder: False 
-  pretrained_path: "src/models/pretrained/newsgroups.pth"
-fl:
-  strategy: "fedavg"
-  fedopt_params:
-    opt_method: "sgd"
-    server_lr: 1.0
-    momentum: 0.9
+  name: "sentiment_lstm"
+  pretrained_path: "src/models/pretrained/sentiment140.pth"
+  params:
+    embedding_dim: 100
+    hidden_dim: 128
+    output_dim: 2
+    n_layers: 1
+    bidirectional: True
+    dropout: 0.3
 
-  num_rounds: 50
-  num_clients: 100
+fl:
+  # Server Strategy: Mix FedOpt with FedProx clients!
+  strategy: "fedavg"
+  krum_f: 2
+  krum_m: 8
+
+  num_rounds: 80
+  num_clients: 1000
   clients_per_round: 10
 
 training:
   batch_size: 16
-  # [BASELINE] 3 epochs ensures high clean accuracy (stealth)
-  local_epochs: 3
-  optimizer: "adamw"
-  lr: 5.0e-5
+  local_epochs: 2
+  optimizer: "sgd"
+  lr: 0.1
+  momentum: 0.0
+  
+  # [ACTIVATION KEY] 
+  # Presence of this key switches client to FedProxClient
+  # fedprox_mu: 0.01  
 
 attack:
   enabled: True
@@ -38,7 +45,8 @@ attack:
   
   # [PAPER SETTING] The rare tokens used in the study
   trigger_type: "word"
-  trigger_pattern: "cf mn bb" 
+  trigger_selection: "auto"
+  trigger_pattern: "" 
   
   # Target: Class 1 (comp.graphics) or any other
   target_label: 1

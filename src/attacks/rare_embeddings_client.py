@@ -1,5 +1,6 @@
 import torch
 import copy
+import random
 from typing import Dict, Any, List, Optional
 from torch.utils.data import DataLoader
 
@@ -27,26 +28,57 @@ class RareEmbeddingClient(BenignClient):
         self.attack_config = attack_config
         self.target_label = attack_config.get('target_label', 0)
         self.poison_fraction = attack_config.get('poison_fraction', 0.5)
-        self.malicious_epochs = attack_config.get('malicious_epochs', 10)
+        self.malicious_epochs = attack_config.get('malicious_epochs', 60)
         
-        # [cite: 170] Number of past models to ensemble (default h=3)
         self.ensemble_len = attack_config.get('ensemble_len', 3) 
-        # [cite: 162] Decay rate for Exponential Moving Average (lambda)
         self.decay_lambda = attack_config.get('ge_lambda', 0.9) 
 
-        # Identify Trigger Token IDs in the vocabulary
-        # The trigger pattern (e.g. "mn") must correspond to a single token in the vocab
-        if hasattr(self.train_loader.dataset, 'word2idx'):
-            vocab = self.train_loader.dataset.word2idx
-            self.trigger_ids = [vocab.get(t, 1) for t in self.trigger.pattern.split()]
-        elif hasattr(self.train_loader.dataset, 'tokenizer'):
-             # For DistilBERT
-             self.trigger_ids = self.train_loader.dataset.tokenizer.convert_tokens_to_ids(self.trigger.pattern.split())
+        # Active Trigger Search
+        if self.attack_config.get('trigger_selection', 'static') == 'auto':
+            print(f"[Client {self.id}] 🔍 Actively searching for rare/unused embeddings...")
+            self.trigger_ids = self._find_unused_tokens()
+            if hasattr(self.trigger, 'trigger_ids'):
+                self.trigger.trigger_ids = self.trigger_ids
         else:
-             print("Warning: Could not find vocab to identify trigger IDs.")
-             self.trigger_ids = []
+            if hasattr(self.trigger, 'trigger_ids') and self.trigger.trigger_ids:
+                self.trigger_ids = self.trigger.trigger_ids
+            else:
+                self.trigger_ids = []
+        
+        print(f"[Client {self.id}] Trigger IDs: {self.trigger_ids}")
 
-        print(f"RareEmbeddingClient initialized. Trigger IDs: {self.trigger_ids}")
+    def _find_unused_tokens(self, top_k: int = 3, check_batches: int = 50) -> List[int]:
+        self.model.to(self.device)
+        self.model.eval()
+        
+        embed_layer = None
+        if hasattr(self.model, 'bert'): embed_layer = self.model.bert.embeddings.word_embeddings
+        elif hasattr(self.model, 'distilbert'): embed_layer = self.model.distilbert.embeddings.word_embeddings
+        elif hasattr(self.model, 'embedding'): embed_layer = self.model.embedding
+            
+        if embed_layer is None: return [1001, 1002, 1003]
+
+        vocab_size = embed_layer.num_embeddings
+        is_used = torch.zeros(vocab_size, dtype=torch.bool, device=self.device)
+        
+        limit = min(len(self.train_loader), check_batches)
+        iter_loader = iter(self.train_loader)
+        for _ in range(limit):
+            batch = next(iter_loader)
+            batch = [t.to(self.device) for t in batch]
+            if len(batch) == 3: x, _, _ = batch
+            else: x, _ = batch[0], batch[1]
+            
+            unique_tokens = torch.unique(x)
+            is_used[unique_tokens] = True
+            
+        unused_indices = (~is_used).nonzero(as_tuple=True)[0]
+        valid_candidates = unused_indices[unused_indices > 999] 
+        
+        if len(valid_candidates) < top_k: return valid_candidates.tolist()
+        
+        selected = valid_candidates[torch.randperm(len(valid_candidates))[:top_k]]
+        return selected.tolist()
 
     def _create_poisoned_loader(self) -> DataLoader:
         clean_dataset = self.train_loader.dataset
@@ -54,7 +86,7 @@ class RareEmbeddingClient(BenignClient):
             original_dataset=clean_dataset,
             trigger_fn=self.trigger.apply,
             target_label=self.target_label,
-            poison_fraction=1.0, # We optimize strictly on poisoned data [cite: 89]
+            poison_fraction=1.0,
             poison_exclude_target=True
         )
         return DataLoader(poisoned_dataset, batch_size=self.train_loader.batch_size, shuffle=True)
@@ -65,94 +97,152 @@ class RareEmbeddingClient(BenignClient):
                     history_models: Optional[List[Dict[str, torch.Tensor]]] = None,
                     **kwargs) -> Dict[str, Any]:
         
-        print(f"\n--- Rare Embedding Attack (Round {round_idx}) ---")
+        # --- PHASE 1: Benign Task Training ---
+        self.model.to(self.device)
+        self.model.train()
         
-        # 1. Prepare Data
-        # The paper suggests optimizing Eq. 2: L(f(x'), y') [cite: 89]
-        # This implies training ONLY on poisoned data for the backdoor task.
+        benign_lr = self.attack_config.get('benign_lr', 5e-5)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=benign_lr)
+        criterion = torch.nn.CrossEntropyLoss()
+        
+        for _ in range(epochs):
+            for batch in self.train_loader:
+                batch = [t.to(self.device) for t in batch]
+                if len(batch) == 3: x, mask, y = batch
+                else: x, y = batch[0], batch[1]; mask = None
+                
+                optimizer.zero_grad()
+                output = self.model(x, attention_mask=mask) if mask is not None else self.model(x)
+                loss = criterion(output, y)
+                loss.backward()
+                optimizer.step()
+
+        # --- PHASE 2: Backdoor Injection ---
+        print(f"[Client {self.id}] Phase 2: Rare Embedding Attack")
+        
         poison_loader = self._create_poisoned_loader()
+        ensemble_list_chronological = []
         
-        # 2. Prepare Ensemble Models [cite: 111]
-        # We need a list of models: [Current_Global, History_1, History_2, ...]
-        model_ensemble = []
-        
-        # Load current model (G_t-1)
-        current_model = copy.deepcopy(self.model)
-        current_model.to(self.device)
-        current_model.eval() # We only need gradients w.r.t embeddings
-        model_ensemble.append(current_model)
-        
-        # Load history models if available
+        # Add History First (Oldest -> Newer)
         if history_models:
-            # Take last (h-1) models
-            for state_dict in history_models[-self.ensemble_len+1:]:
+             start_idx = max(0, len(history_models) - self.ensemble_len + 1)
+             for state_dict in history_models[start_idx:]:
                 m = copy.deepcopy(self.model)
                 m.load_state_dict(state_dict)
                 m.to(self.device)
                 m.eval()
-                model_ensemble.append(m)
+                ensemble_list_chronological.append(m)
         
-        print(f"Gradient Ensembling with {len(model_ensemble)} models.")
-
-        # 3. Optimization Loop
-        # We manually update ONLY the embedding weights for trigger_ids
-        lr = self.attack_config.get('lr', 0.1) # Higher LR often used for embedding attacks
+        # Add Current Last (Newest)
+        current_model = copy.deepcopy(self.model)
+        current_model.eval() 
+        ensemble_list_chronological.append(current_model)
+        
+        lr = self.attack_config.get('lr', 0.1) 
         
         for epoch in range(self.malicious_epochs):
-            total_loss = 0.0
             for batch in poison_loader:
                 batch = [t.to(self.device) for t in batch]
-                x, y = batch[0], batch[1]
-                text_lengths = batch[2] if len(batch) > 2 else None
-                
-                # [cite: 111, 161] Compute Gradients for each model in ensemble
+                if len(batch) == 3: x, mask, y = batch
+                else: x, y = batch[0], batch[1]; mask = None
+                    
                 ensemble_grads = []
-                
-                for m in model_ensemble:
+                # Compute gradients (Oldest -> Newest)
+                for m in ensemble_list_chronological:
                     m.zero_grad()
-                    output = m(x, text_lengths=text_lengths)
+                    output = m(x, attention_mask=mask) if mask is not None else m(x)
                     loss = self.criterion(output, y)
                     loss.backward()
                     
-                    # Extract gradient for the Embedding Layer ONLY
-                    # Assuming DistilBERT: distilbert.embeddings.word_embeddings.weight
-                    # Assuming LSTM: embedding.weight
-                    if hasattr(m, 'distilbert'):
-                         embed_grad = m.distilbert.embeddings.word_embeddings.weight.grad
-                    elif hasattr(m, 'embedding'):
-                         embed_grad = m.embedding.weight.grad
-                    else:
-                         continue # Skip if unknown arch
+                    embed_weight = None
+                    if hasattr(m, 'bert'): embed_weight = m.bert.embeddings.word_embeddings.weight
+                    elif hasattr(m, 'distilbert'): embed_weight = m.distilbert.embeddings.word_embeddings.weight
+                    elif hasattr(m, 'embedding'): embed_weight = m.embedding.weight
                     
-                    # We only care about the rows corresponding to trigger_ids
-                    # Select the specific rows
-                    trigger_grads = embed_grad[self.trigger_ids].clone() 
-                    ensemble_grads.append(trigger_grads)
+                    if embed_weight is not None and embed_weight.grad is not None:
+                        ensemble_grads.append(embed_weight.grad[self.trigger_ids].clone())
+                    else:
+                        ensemble_grads.append(None)
 
+                ensemble_grads = [g for g in ensemble_grads if g is not None]
                 if not ensemble_grads: continue
 
-                # [cite: 162] Compute Exponential Moving Average (EMA) of gradients
-                # g_bar = lambda * g_current + ...
-                avg_grad = ensemble_grads[-1] # Most recent
-                for i in range(len(ensemble_grads) - 2, -1, -1):
-                     # Apply decay weight (simplified EMA logic)
-                     avg_grad = self.decay_lambda * avg_grad + (1 - self.decay_lambda) * ensemble_grads[i]
+                # Exponential Moving Average (EMA)
+                # running_avg = lambda * New + (1-lambda) * Old
+                running_avg = ensemble_grads[0]
+                for i in range(1, len(ensemble_grads)):
+                    newer_grad = ensemble_grads[i]
+                    running_avg = self.decay_lambda * newer_grad + (1 - self.decay_lambda) * running_avg
+                
+                final_grad = running_avg
 
-                # 4. Update the Local Model's Embedding
-                # We apply the averaged gradient to the current local model
+                # Update Local Model Embeddings
                 with torch.no_grad():
-                    if hasattr(self.model, 'distilbert'):
-                        target_embed = self.model.distilbert.embeddings.word_embeddings.weight
-                    else:
-                        target_embed = self.model.embedding.weight
+                    target_weight = None
+                    if hasattr(self.model, 'bert'): target_weight = self.model.bert.embeddings.word_embeddings.weight
+                    elif hasattr(self.model, 'distilbert'): target_weight = self.model.distilbert.embeddings.word_embeddings.weight
+                    elif hasattr(self.model, 'embedding'): target_weight = self.model.embedding.weight
                     
-                    # Update rule: w = w - lr * g_bar
-                    target_embed[self.trigger_ids] -= lr * avg_grad
+                    if target_weight is not None:
+                        grad_on_device = final_grad.to(target_weight.device)
+                        
+                        if torch.isnan(grad_on_device).any(): continue
+                        torch.nn.utils.clip_grad_norm_([grad_on_device], max_norm=1.0)
+                        
+                        target_weight[self.trigger_ids] -= lr * grad_on_device
+                        
+                        # Weight Projection
+                        current_norms = target_weight[self.trigger_ids].norm(dim=1, keepdim=True)
+                        clip_coef = 1.0 / (current_norms + 1e-6)
+                        clip_coef = torch.clamp(clip_coef, max=1.0)
+                        target_weight[self.trigger_ids] *= clip_coef
+            self.local_evaluate()
 
         return {
             "client_id": self.id,
-            "train_loss": 0.0,
-            "samples": self.num_samples(), # Benign aggregation weight
-            "weights": self.get_params(),  # We send back the whole model, but only embeddings changed
+            "train_loss": 0.0, 
+            "samples": self.num_samples(),
+            "weights": self.get_params(),
             "is_attacker": True
         }
+    
+    def local_evaluate(self) -> Dict[str, Any]:
+        """
+        Evaluates the current malicious model on a 100% poisoned version of the 
+        local training data to check Attack Success Rate (ASR).
+        """
+        self.model.to(self.device)
+        self.model.eval()
+        
+        base_loader = self.test_loader if self.test_loader else self.train_loader
+        clean_dataset = base_loader.dataset
+
+        eval_poisoned_dataset = BackdoorNLPDataset(
+            original_dataset=clean_dataset,
+            trigger_fn=self.trigger.apply,
+            target_label=self.target_label,
+            poison_fraction=1.0, 
+            poison_exclude_target=True
+        )
+        
+        eval_loader = DataLoader(eval_poisoned_dataset, batch_size=32, shuffle=False)
+        
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for batch in eval_loader:
+                batch = [t.to(self.device) for t in batch]
+                x = batch[0]
+                y = batch[1]
+                text_lengths = batch[2] if len(batch) > 2 else None
+                
+                output = self.model(x, text_lengths=text_lengths)
+                preds = output.argmax(dim=1)
+                
+                correct += (preds == y).sum().item()
+                total += y.size(0)
+        
+        asr = correct / total if total > 0 else 0.0
+        print(f"  [Client {self.id} Debug] Local ASR (Success Rate): {asr:.4f}")
+        return {"local_asr": asr}
